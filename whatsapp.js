@@ -8,11 +8,13 @@ const WHATSAPP_TOKEN = process.env.WHATSAPP_TOKEN;
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
 const PHONE_NUMBER_ID = process.env.PHONE_NUMBER_ID;
 const VERIFY_TOKEN = process.env.VERIFY_TOKEN;
+const PAGE_ACCESS_TOKEN = process.env.PAGE_ACCESS_TOKEN;
 const PORT = process.env.PORT || 3000;
 
 console.log("WHATSAPP_TOKEN present:", !!WHATSAPP_TOKEN);
 console.log("ANTHROPIC_API_KEY present:", !!ANTHROPIC_API_KEY);
 console.log("PHONE_NUMBER_ID present:", !!PHONE_NUMBER_ID);
+console.log("PAGE_ACCESS_TOKEN present:", !!PAGE_ACCESS_TOKEN);
 
 const conversations = {};
 
@@ -83,6 +85,8 @@ ICE detention: URGENT. Call 626-678-8677. Locate via ICE Detainee Locator 1-888-
 
 NTA received: URGENT. Direct to Michael Liu immediately.
 
+California: AB 60 driver's license for undocumented. SB 54 limits local ICE cooperation.
+
 ============================
 CAR ACCIDENTS & PERSONAL INJURY
 ============================
@@ -94,6 +98,8 @@ After an accident: Call 911. Get medical attention. Document with photos. Don't 
 Deadlines: Personal injury — 2 years. Government vehicle — only 6 MONTHS. Missing this permanently bars the claim.
 
 Contingency fees: 33.3% pre-lawsuit, 40% if trial. No upfront cost.
+
+California insurance minimums (Jan 2025): 30/60/15.
 
 ============================
 BUSINESS LITIGATION
@@ -127,24 +133,37 @@ Probate costs: $500K = $26,000. $1M = $46,000. $1.5M = $56,000.
 Prop 19 (2021): Only family home qualifies for property tax exclusion now.
 Trust packages: $1,500-$3,000 individual, $2,500-$5,000 couple.`;
 
-async function sendWhatsAppMessage(to, text) {
-  const url = `https://graph.facebook.com/v18.0/${PHONE_NUMBER_ID}/messages`;
-  console.log("Sending to:", to);
-  const response = await axios.post(url, {
-    messaging_product: "whatsapp",
-    to: to,
-    type: "text",
-    text: { body: text }
-  }, {
-    headers: {
-      "Authorization": `Bearer ${WHATSAPP_TOKEN}`,
-      "Content-Type": "application/json"
-    }
-  });
-  console.log("Send status:", response.status);
-  return response;
-}
+// ── Welcome message ──────────────────────────────────────
+const WELCOME_MESSAGE = `Hey there! 👋 I'm Zara, the virtual assistant for Tez Law P.C.
 
+I'm here to help you figure out your legal options and connect you with the right person on our team. We handle:
+
+🛂 Immigration
+🚗 Car Accidents & Personal Injury
+⚖️ Business Litigation
+™️ Patents & Trademarks
+📋 Estate Planning
+
+What's going on? Tell me what's on your mind! 😊`;
+
+const CONTACT_MESSAGE = `Here's the Tez Law P.C. team:
+
+👨‍💼 JJ Zhang (Managing Attorney)
+📞 626-678-8677
+📧 jj@tezlawfirm.com
+
+📋 Jue Wang (USCIS filings)
+📧 jue.wang@tezlawfirm.com
+
+⚖️ Michael Liu (Immigration court)
+📧 michael.liu@tezlawfirm.com
+
+🚗 Lin Mei (Car accidents & state court)
+📧 lin.mei@tezlawfirm.com
+
+📍 West Covina, California`;
+
+// ── Claude API ────────────────────────────────────────────
 async function askClaude(userId, userMessage) {
   if (!conversations[userId]) conversations[userId] = [];
   conversations[userId].push({ role: "user", content: userMessage });
@@ -172,7 +191,66 @@ async function askClaude(userId, userMessage) {
   return reply;
 }
 
-// Webhook verification
+// ── WhatsApp sender ───────────────────────────────────────
+async function sendWhatsAppMessage(to, text) {
+  const url = `https://graph.facebook.com/v18.0/${PHONE_NUMBER_ID}/messages`;
+  const response = await axios.post(url, {
+    messaging_product: "whatsapp",
+    to: to,
+    type: "text",
+    text: { body: text }
+  }, {
+    headers: {
+      "Authorization": `Bearer ${WHATSAPP_TOKEN}`,
+      "Content-Type": "application/json"
+    }
+  });
+  console.log("WhatsApp send status:", response.status);
+  return response;
+}
+
+// ── Facebook Messenger sender ─────────────────────────────
+async function sendMessengerMessage(recipientId, text) {
+  const url = `https://graph.facebook.com/v18.0/me/messages`;
+  const response = await axios.post(url, {
+    recipient: { id: recipientId },
+    message: { text: text }
+  }, {
+    headers: {
+      "Authorization": `Bearer ${PAGE_ACCESS_TOKEN}`,
+      "Content-Type": "application/json"
+    }
+  });
+  console.log("Messenger send status:", response.status);
+  return response;
+}
+
+// ── Process message (shared logic) ───────────────────────
+async function processMessage(userId, userText, sendFn) {
+  const lowerText = userText.toLowerCase().trim();
+
+  if (["hi", "hello", "hey", "hola", "start", "你好"].includes(lowerText)) {
+    conversations[userId] = [];
+    await sendFn(WELCOME_MESSAGE);
+    return;
+  }
+
+  if (["contact", "team", "contacto"].includes(lowerText)) {
+    await sendFn(CONTACT_MESSAGE);
+    return;
+  }
+
+  if (lowerText === "reset") {
+    conversations[userId] = [];
+    await sendFn("Fresh start! What can I help you with? 😊");
+    return;
+  }
+
+  const reply = await askClaude(userId, userText);
+  await sendFn(reply);
+}
+
+// ── Webhook verification ──────────────────────────────────
 app.get("/webhook", (req, res) => {
   const mode = req.query["hub.mode"];
   const token = req.query["hub.verify_token"];
@@ -188,66 +266,74 @@ app.get("/webhook", (req, res) => {
   }
 });
 
-// Receive messages
+// ── Webhook receiver ──────────────────────────────────────
 app.post("/webhook", async (req, res) => {
   res.sendStatus(200);
-
   const body = req.body;
-  if (!body.object || body.object !== "whatsapp_business_account") return;
+  console.log("Webhook received:", JSON.stringify(body).substring(0, 300));
 
-  const message = body.entry?.[0]?.changes?.[0]?.value?.messages?.[0];
-  if (!message) return;
+  // ── WhatsApp messages ─────────────────────────────────
+  if (body.object === "whatsapp_business_account") {
+    const message = body.entry?.[0]?.changes?.[0]?.value?.messages?.[0];
+    if (!message) return;
 
-  const from = message.from;
-  const messageType = message.type;
+    const from = message.from;
+    const messageType = message.type;
 
-  if (messageType !== "text") {
-    await sendWhatsAppMessage(from, "Hey! I can only read text messages right now. What's on your mind? 😊");
+    if (messageType !== "text") {
+      await sendWhatsAppMessage(from, "Hey! I can only read text messages right now. What's on your mind? 😊");
+      return;
+    }
+
+    const userText = message.text.body;
+    console.log("WhatsApp from:", from, ":", userText);
+
+    try {
+      await processMessage(from, userText, (text) => sendWhatsAppMessage(from, text));
+    } catch (err) {
+      console.error("WhatsApp error:", err.response?.data || err.message);
+      try {
+        await sendWhatsAppMessage(from, "Something went wrong — sorry! 😔\n📞 626-678-8677\n📧 jj@tezlawfirm.com");
+      } catch (e) {
+        console.error("Failed to send error:", e.message);
+      }
+    }
     return;
   }
 
-  const userText = message.text.body;
-  console.log("Message from:", from, ":", userText);
+  // ── Facebook Messenger messages ───────────────────────
+  if (body.object === "page") {
+    const entry = body.entry?.[0];
+    const messagingEvent = entry?.messaging?.[0];
 
-  try {
-    const lowerText = userText.toLowerCase().trim();
+    if (!messagingEvent || !messagingEvent.message) return;
 
-    if (["hi", "hello", "hey", "hola", "start", "你好"].includes(lowerText)) {
-      conversations[from] = [];
-      await sendWhatsAppMessage(from,
-        `Hey there! 👋 I'm Zara, the virtual assistant for Tez Law P.C.\n\nI'm here to help you figure out your legal options and connect you with the right person on our team. We handle:\n\n🛂 Immigration\n🚗 Car Accidents & Personal Injury\n⚖️ Business Litigation\n™️ Patents & Trademarks\n📋 Estate Planning\n\nWhat's going on? Tell me what's on your mind! 😊`
-      );
+    const senderId = messagingEvent.sender.id;
+    const messageText = messagingEvent.message.text;
+
+    if (!messageText) {
+      await sendMessengerMessage(senderId, "Hey! I can only read text messages right now. What's on your mind? 😊");
       return;
     }
 
-    if (["contact", "team", "contacto"].includes(lowerText)) {
-      await sendWhatsAppMessage(from,
-        `Here's the Tez Law P.C. team:\n\n👨‍💼 JJ Zhang (Managing Attorney)\n📞 626-678-8677\n📧 jj@tezlawfirm.com\n\n📋 Jue Wang (USCIS filings)\n📧 jue.wang@tezlawfirm.com\n\n⚖️ Michael Liu (Immigration court)\n📧 michael.liu@tezlawfirm.com\n\n🚗 Lin Mei (Car accidents & state court)\n📧 lin.mei@tezlawfirm.com\n\n📍 West Covina, California`
-      );
-      return;
-    }
+    console.log("Messenger from:", senderId, ":", messageText);
 
-    if (lowerText === "reset") {
-      conversations[from] = [];
-      await sendWhatsAppMessage(from, "Fresh start! What can I help you with? 😊");
-      return;
-    }
-
-    const reply = await askClaude(from, userText);
-    await sendWhatsAppMessage(from, reply);
-
-  } catch (err) {
-    console.error("Error:", err.response?.data || err.message);
     try {
-      await sendWhatsAppMessage(from, "Something went wrong on my end — sorry! 😔\n📞 626-678-8677\n📧 jj@tezlawfirm.com");
-    } catch (e) {
-      console.error("Failed to send error message:", e.message);
+      await processMessage(senderId, messageText, (text) => sendMessengerMessage(senderId, text));
+    } catch (err) {
+      console.error("Messenger error:", err.response?.data || err.message);
+      try {
+        await sendMessengerMessage(senderId, "Something went wrong — sorry! 😔\n📞 626-678-8677\n📧 jj@tezlawfirm.com");
+      } catch (e) {
+        console.error("Failed to send error:", e.message);
+      }
     }
+    return;
   }
 });
 
-app.get("/", (req, res) => res.send("Tez Law P.C. — Zara WhatsApp Bot is running."));
+app.get("/", (req, res) => res.send("Tez Law P.C. — Zara is running on WhatsApp & Facebook Messenger."));
 
 app.listen(PORT, () => {
-  console.log(`Zara WhatsApp bot running on port ${PORT}`);
+  console.log(`Zara bot running on port ${PORT}`);
 });
