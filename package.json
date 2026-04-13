@@ -1,0 +1,13 @@
+{
+  "name": "tezlaw-whatsapp-bot",
+  "version": "1.0.0",
+  "description": "Tez Law P.C. WhatsApp bot powered by Zara",
+  "main": "whatsapp.js",
+  "scripts": {
+    "start": "node whatsapp.js"
+  },
+  "dependencies": {
+    "axios": "^1.6.0",
+    "express": "^4.18.0"
+  }
+}
