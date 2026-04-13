@@ -211,7 +211,8 @@ async function sendWhatsAppMessage(to, text) {
 
 // ── Facebook Messenger sender ─────────────────────────────
 async function sendMessengerMessage(recipientId, text) {
-  const url = `https://graph.facebook.com/v18.0/me/messages`;
+  const PAGE_ID = process.env.PAGE_ID;
+  const url = `https://graph.facebook.com/v18.0/${PAGE_ID}/messages`;
   const response = await axios.post(url, {
     recipient: { id: recipientId },
     message: { text: text }
