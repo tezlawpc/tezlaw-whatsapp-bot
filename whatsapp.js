@@ -252,20 +252,6 @@ function setCachedAnswer(msg, answer) {
   saveCache(cache);
 }
 
-function isLegalResearchQuestion(message) {
-  const q = message.toLowerCase();
-  const legalKeywords = [
-    "ina", "cfr", "§", "section", "statute", "code", "regulation",
-    "uscis", "bia", "eoir", "removal", "deportation",
-    "vehicle code", "civil code", "probate code", "ccp",
-    "uspto", "patent", "trademark",
-    "processing time", "filing fee", "form i-",
-    "case law", "matter of", "decision", "ruling",
-    "what does", "what is the law", "is it legal", "what are the requirements"
-  ];
-  return legalKeywords.some(kw => q.includes(kw));
-}
-
 // ── Claude API (no web search — must respond within 5s) ───
 async function askClaude(userId, userMessage) {
   if (!conversations[userId]) conversations[userId] = [];
@@ -278,14 +264,12 @@ async function askClaude(userId, userMessage) {
     return cached;
   }
 
-  // Use web search with 4s timeout to stay within WeChat's 5s limit
-  const claudeRequest = axios.post(
+  const response = await axios.post(
     "https://api.anthropic.com/v1/messages",
     {
       model: "claude-sonnet-4-20250514",
       max_tokens: 800,
       system: SYSTEM_PROMPT,
-      tools: [{ type: "web_search_20250305", name: "web_search" }],
       messages: recentHistory,
     },
     {
@@ -294,38 +278,8 @@ async function askClaude(userId, userMessage) {
         "anthropic-version": "2023-06-01",
         "content-type": "application/json",
       },
-      timeout: 4000,
     }
   );
-
-  // Fallback if web search times out
-  const timeoutPromise = new Promise((_, reject) =>
-    setTimeout(() => reject(new Error("timeout")), 4000)
-  );
-
-  let response;
-  try {
-    response = await Promise.race([claudeRequest, timeoutPromise]);
-  } catch (timeoutErr) {
-    // If timeout, retry without web search
-    response = await axios.post(
-      "https://api.anthropic.com/v1/messages",
-      {
-        model: "claude-sonnet-4-20250514",
-        max_tokens: 800,
-        system: SYSTEM_PROMPT,
-        messages: recentHistory,
-      },
-      {
-        headers: {
-          "x-api-key": ANTHROPIC_API_KEY,
-          "anthropic-version": "2023-06-01",
-          "content-type": "application/json",
-        },
-        timeout: 3000,
-      }
-    );
-  }
   const reply = response.data.content
     .filter(b => b.type === "text")
     .map(b => b.text)
@@ -333,6 +287,34 @@ async function askClaude(userId, userMessage) {
   conversations[userId].push({ role: "assistant", content: reply });
   if (reply.length > 50) setCachedAnswer(userMessage, reply);
   await checkAndNotifyLead(userId, userMessage, reply);
+  return reply;
+}
+
+// ── Claude API without web search (fast fallback) ────────
+async function askClaudeNoSearch(userId, userMessage) {
+  if (!conversations[userId]) conversations[userId] = [];
+  conversations[userId].push({ role: "user", content: userMessage });
+  const recentHistory = conversations[userId].slice(-20);
+  const response = await axios.post(
+    "https://api.anthropic.com/v1/messages",
+    {
+      model: "claude-sonnet-4-20250514",
+      max_tokens: 800,
+      system: SYSTEM_PROMPT,
+      messages: recentHistory,
+    },
+    {
+      headers: {
+        "x-api-key": ANTHROPIC_API_KEY,
+        "anthropic-version": "2023-06-01",
+        "content-type": "application/json",
+      },
+    }
+  );
+  const reply = response.data.content
+    .filter(b => b.type === "text").map(b => b.text).join("")
+    || "请联系我们：626-678-8677 / jj@tezlawfirm.com";
+  conversations[userId].push({ role: "assistant", content: reply });
   return reply;
 }
 
@@ -412,6 +394,14 @@ app.post("/webhook", async (req, res) => {
 
     console.log(`WeChat message from: ${openId} : ${content}`);
 
+    // Deduplicate retries
+    if (processedMessages.has(msgId)) {
+      console.log("Duplicate ignored:", msgId);
+      return res.send("success");
+    }
+    processedMessages.add(msgId);
+    setTimeout(() => processedMessages.delete(msgId), 60000);
+
     // Non-text
     if (msgType !== "text") {
       const reply = buildXmlReply(openId, toUser, "您好！我只能处理文字消息。\n\nHi! Text messages only please.");
@@ -427,18 +417,25 @@ app.post("/webhook", async (req, res) => {
       return res.send(reply);
     }
 
-    // Deduplicate — ignore if already processing this message
-    if (processedMessages.has(msgId)) {
-      console.log("Duplicate ignored:", msgId);
-      return res.send("success");
+    // Get Zara response — 4s timeout, then fallback without web search
+    let zaraReply;
+    try {
+      const withSearch = askClaude(openId, content);
+      const timeout = new Promise((_, rej) => setTimeout(() => rej(new Error("timeout")), 4000));
+      zaraReply = await Promise.race([withSearch, timeout]);
+    } catch (e) {
+      console.log("Timeout or error, retrying without web search:", e.message);
+      try {
+        // Rebuild history without the failed attempt
+        if (conversations[openId]) {
+          conversations[openId].pop(); // remove the user message that failed
+        }
+        zaraReply = await askClaudeNoSearch(openId, content);
+      } catch (e2) {
+        zaraReply = "我遇到了技术问题，请稍后再试。\n\nTechnical issue, please try again or call 626-678-8677.";
+      }
     }
-    processedMessages.add(msgId);
-    setTimeout(() => processedMessages.delete(msgId), 60000);
-
-    // Get Zara response and reply
-    console.log("Processing with Claude...");
-    const zaraReply = await askClaude(openId, content);
-    console.log("Claude replied:", zaraReply.substring(0, 50));
+    await checkAndNotifyLead(openId, content, zaraReply, "WeChat");
     const xmlReply = buildXmlReply(openId, toUser, zaraReply);
     res.set("Content-Type", "text/xml");
     res.send(xmlReply);
