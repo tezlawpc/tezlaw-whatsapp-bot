@@ -412,14 +412,6 @@ app.post("/webhook", async (req, res) => {
 
     console.log(`WeChat message from: ${openId} : ${content}`);
 
-    // Deduplicate retries
-    if (processedMessages.has(msgId)) {
-      console.log("Duplicate ignored:", msgId);
-      return res.send("success");
-    }
-    processedMessages.add(msgId);
-    setTimeout(() => processedMessages.delete(msgId), 60000);
-
     // Non-text
     if (msgType !== "text") {
       const reply = buildXmlReply(openId, toUser, "您好！我只能处理文字消息。\n\nHi! Text messages only please.");
@@ -435,8 +427,18 @@ app.post("/webhook", async (req, res) => {
       return res.send(reply);
     }
 
+    // Deduplicate — ignore if already processing this message
+    if (processedMessages.has(msgId)) {
+      console.log("Duplicate ignored:", msgId);
+      return res.send("success");
+    }
+    processedMessages.add(msgId);
+    setTimeout(() => processedMessages.delete(msgId), 60000);
+
     // Get Zara response and reply
+    console.log("Processing with Claude...");
     const zaraReply = await askClaude(openId, content);
+    console.log("Claude replied:", zaraReply.substring(0, 50));
     const xmlReply = buildXmlReply(openId, toUser, zaraReply);
     res.set("Content-Type", "text/xml");
     res.send(xmlReply);
