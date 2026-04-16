@@ -25,7 +25,7 @@ Your name is Zara. You are a warm, friendly legal assistant for Tez Law P.C. in 
 THE TEAM
 ============================
 
-JJ ZHANG (章) — Managing Attorney
+JJ ZHANG — Managing Attorney
 - Phone: 626-678-8677
 - Email: jj@tezlawfirm.com
 
@@ -470,21 +470,45 @@ async function processMessage(userId, userText, sendFn, platform) {
   await sendFn(reply);
 }
 
-// ── Webhook verification ──────────────────────────────────
-app.get("/webhook", (req, res) => {
-  const mode = req.query["hub.mode"];
-  const token = req.query["hub.verify_token"];
-  const challenge = req.query["hub.challenge"];
+// ── WhatsApp media download ───────────────────────────────
+async function downloadWhatsAppMedia(mediaId) {
+  const metaResp = await axios.get(
+    `https://graph.facebook.com/v18.0/${mediaId}`,
+    { headers: { "Authorization": `Bearer ${WHATSAPP_TOKEN}` } }
+  );
+  const { url, mime_type } = metaResp.data;
+  const fileResp = await axios.get(url, {
+    headers: { "Authorization": `Bearer ${WHATSAPP_TOKEN}` },
+    responseType: "arraybuffer"
+  });
+  return { buffer: Buffer.from(fileResp.data), mimeType: mime_type };
+}
 
-  console.log("Verification attempt — mode:", mode, "token:", token);
+async function askClaudeWithMedia(userId, buffer, mediaType, caption, platform) {
+  const base64 = buffer.toString("base64");
+  const userPrompt = caption || "Please analyze this. If it's a legal document, explain what it is and what it means.";
+  const contentBlock = mediaType === "application/pdf"
+    ? { type: "document", source: { type: "base64", media_type: "application/pdf", data: base64 } }
+    : { type: "image", source: { type: "base64", media_type: mediaType, data: base64 } };
 
-  if (mode === "subscribe" && token === VERIFY_TOKEN) {
-    console.log("Webhook verified!");
-    res.status(200).send(challenge);
-  } else {
-    res.sendStatus(403);
-  }
-});
+  const response = await axios.post(
+    "https://api.anthropic.com/v1/messages",
+    {
+      model: "claude-sonnet-4-20250514",
+      max_tokens: 1024,
+      system: SYSTEM_PROMPT,
+      messages: [{ role: "user", content: [contentBlock, { type: "text", text: userPrompt }] }]
+    },
+    { headers: { "x-api-key": ANTHROPIC_API_KEY, "anthropic-version": "2023-06-01", "content-type": "application/json" } }
+  );
+  const reply = response.data.content.filter(b => b.type === "text").map(b => b.text).join("") ||
+    "I had trouble reading that file. Please try again or contact us at 626-678-8677.";
+  if (!conversations[userId]) conversations[userId] = [];
+  conversations[userId].push({ role: "user", content: `[File sent] ${caption || ""}` });
+  conversations[userId].push({ role: "assistant", content: reply });
+  await checkAndNotifyLead(userId, caption || "", reply, platform);
+  return reply;
+}
 
 // ── Webhook receiver ──────────────────────────────────────
 app.post("/webhook", async (req, res) => {
@@ -500,23 +524,51 @@ app.post("/webhook", async (req, res) => {
     const from = message.from;
     const messageType = message.type;
 
-    if (messageType !== "text") {
-      await sendWhatsAppMessage(from, "Hey! I can only read text messages right now. What's on your mind? 😊");
-      return;
-    }
-
-    const userText = message.text.body;
-    console.log("WhatsApp from:", from, ":", userText);
-
     try {
-      await processMessage(from, userText, (text) => sendWhatsAppMessage(from, text), "WhatsApp");
+      // IMAGE
+      if (messageType === "image") {
+        const { buffer, mimeType } = await downloadWhatsAppMedia(message.image.id);
+        const caption = message.image.caption || "";
+        const reply = await askClaudeWithMedia(from, buffer, mimeType, caption, "WhatsApp");
+        await sendWhatsAppMessage(from, reply);
+        return;
+      }
+
+      // DOCUMENT (PDF)
+      if (messageType === "document") {
+        const { buffer, mimeType } = await downloadWhatsAppMedia(message.document.id);
+        const caption = message.document.caption || message.document.filename || "";
+        if (mimeType === "application/pdf") {
+          const reply = await askClaudeWithMedia(from, buffer, "application/pdf", caption, "WhatsApp");
+          await sendWhatsAppMessage(from, reply);
+        } else {
+          await sendWhatsAppMessage(from, "I can read images and PDF documents. Please send your document as a PDF or image.");
+        }
+        return;
+      }
+
+      // AUDIO/VOICE
+      if (messageType === "audio") {
+        await sendWhatsAppMessage(from, "I received your voice message! I can't process audio yet, but you can type your question and I'll help right away. 😊");
+        return;
+      }
+
+      // TEXT
+      if (messageType === "text") {
+        const userText = message.text.body;
+        console.log("WhatsApp from:", from, ":", userText);
+        await processMessage(from, userText, (text) => sendWhatsAppMessage(from, text), "WhatsApp");
+        return;
+      }
+
+      // OTHER
+      await sendWhatsAppMessage(from, "I can read text messages, images, and PDF documents. What can I help you with?");
+
     } catch (err) {
       console.error("WhatsApp error:", err.response?.data || err.message);
       try {
         await sendWhatsAppMessage(from, "Something went wrong — sorry! 😔\n📞 626-678-8677\n📧 jj@tezlawfirm.com");
-      } catch (e) {
-        console.error("Failed to send error:", e.message);
-      }
+      } catch (e) { console.error("Failed to send error:", e.message); }
     }
     return;
   }
@@ -525,28 +577,24 @@ app.post("/webhook", async (req, res) => {
   if (body.object === "page") {
     const entry = body.entry?.[0];
     const messagingEvent = entry?.messaging?.[0];
-
     if (!messagingEvent || !messagingEvent.message) return;
 
     const senderId = messagingEvent.sender.id;
     const messageText = messagingEvent.message.text;
 
     if (!messageText) {
-      await sendMessengerMessage(senderId, "Hey! I can only read text messages right now. What's on your mind? 😊");
+      await sendMessengerMessage(senderId, "Hey! I can read text messages right now. What's on your mind? 😊");
       return;
     }
 
     console.log("Messenger from:", senderId, ":", messageText);
-
     try {
       await processMessage(senderId, messageText, (text) => sendMessengerMessage(senderId, text), "Facebook Messenger");
     } catch (err) {
       console.error("Messenger error:", err.response?.data || err.message);
       try {
         await sendMessengerMessage(senderId, "Something went wrong — sorry! 😔\n📞 626-678-8677\n📧 jj@tezlawfirm.com");
-      } catch (e) {
-        console.error("Failed to send error:", e.message);
-      }
+      } catch (e) { console.error("Failed to send error:", e.message); }
     }
     return;
   }
