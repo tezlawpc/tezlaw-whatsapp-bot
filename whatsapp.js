@@ -238,7 +238,8 @@ FOR HIGH URGENCY situations, your response must:
 3. Tell them NOT to sign anything without speaking to an attorney first
 4. Keep it SHORT and action-focused
 
-Example: "I hear you — this is serious and you're not alone. Please call us RIGHT NOW at 626-678-8677. Do NOT sign anything until you speak with an attorney."\`;
+Example: "I hear you — this is serious and you're not alone. Please call us RIGHT NOW at 626-678-8677. Do NOT sign anything until you speak with an attorney."`;
+
 
 
 // ── Welcome message ──────────────────────────────────────
